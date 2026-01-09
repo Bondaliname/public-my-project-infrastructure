@@ -1,0 +1,139 @@
+name: Build and Push Images
+
+on:
+  workflow_run:
+    workflows: ["Terraform Azure CI/CD"]
+    types:
+      - completed
+    branches:
+      - master
+  repository_dispatch:
+    types: [frontend-updated, backend-updated]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  actions: read
+  contents: read
+
+env:
+  FRONTEND_REPO: "mategames-team/frontend"
+  BACKEND_REPO: "mategames-team/backend"
+
+jobs:
+  setup:
+    name: Setup Environment
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'repository_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+
+    outputs:
+      acr_login_server: ${{ steps.load.outputs.acr_login_server }}
+      acr_name: ${{ steps.load.outputs.acr_name }}
+      public_ip: ${{ steps.load.outputs.public_ip }}
+      mysql_host: ${{ steps.load.outputs.mysql_host }}
+
+    steps:
+      - name: Download Terraform Outputs
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: terraform.yml
+          name: terraform-outputs
+          path: .
+
+      - name: Load Outputs
+        id: load
+        run: |
+          source terraform-outputs.env
+          echo "acr_login_server=$ACR_LOGIN_SERVER" >> $GITHUB_OUTPUT
+          echo "acr_name=${ACR_LOGIN_SERVER%%.*}" >> $GITHUB_OUTPUT
+          echo "public_ip=$TRAEFIK_PUBLIC_IP" >> $GITHUB_OUTPUT
+          echo "mysql_host=$MYSQL_HOST" >> $GITHUB_OUTPUT
+
+  build-backend:
+    name: Build Backend
+    runs-on: ubuntu-latest
+    needs: setup
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'repository_dispatch' && github.event.action == 'backend-updated' ||
+      github.event_name == 'workflow_run'
+
+    steps:
+      - name: Checkout backend repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.BACKEND_REPO }}
+          ref: main
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Get commit hash
+        id: commit
+        run: |
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          echo "hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: az acr login --name ${{ needs.setup.outputs.acr_name }}
+
+      - name: Build and Push Backend
+        run: |
+          docker build -t ${{ needs.setup.outputs.acr_login_server }}/backend:${{ steps.commit.outputs.hash }} .
+          docker push ${{ needs.setup.outputs.acr_login_server }}/backend:${{ steps.commit.outputs.hash }}
+
+          docker tag ${{ needs.setup.outputs.acr_login_server }}/backend:${{ steps.commit.outputs.hash }} \
+                     ${{ needs.setup.outputs.acr_login_server }}/backend:latest
+          docker push ${{ needs.setup.outputs.acr_login_server }}/backend:latest
+
+  build-frontend:
+    name: Build Frontend
+    runs-on: ubuntu-latest
+    needs: setup
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'repository_dispatch' && github.event.action == 'frontend-updated' ||
+      github.event_name == 'workflow_run'
+
+    steps:
+      - name: Checkout frontend repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FRONTEND_REPO }}
+          ref: main
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Get commit hash
+        id: commit
+        run: |
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          echo "hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: az acr login --name ${{ needs.setup.outputs.acr_name }}
+
+      - name: Build and Push Frontend
+        run: |
+          docker build \
+            --build-arg VITE_API_URL="http://games.${{ needs.setup.outputs.public_ip }}.nip.io/api" \
+            -t ${{ needs.setup.outputs.acr_login_server }}/frontend:${{ steps.commit.outputs.hash }} .
+          docker push ${{ needs.setup.outputs.acr_login_server }}/frontend:${{ steps.commit.outputs.hash }}
+
+          docker tag ${{ needs.setup.outputs.acr_login_server }}/frontend:${{ steps.commit.outputs.hash }} \
+                     ${{ needs.setup.outputs.acr_login_server }}/frontend:latest
+          docker push ${{ needs.setup.outputs.acr_login_server }}/frontend:latest

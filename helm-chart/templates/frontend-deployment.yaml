@@ -1,0 +1,42 @@
+{{- if .Values.frontend.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-frontend
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: {{ .Release.Name }}
+    component: frontend
+    environment: {{ .Values.global.environment }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.frontend.replicaCount }}
+  {{- end }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+      component: frontend
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+        component: frontend
+        environment: {{ .Values.global.environment }}
+    spec:
+      containers:
+      - name: frontend
+        image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"
+        imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: {{ .Values.frontend.service.targetPort }}
+          protocol: TCP
+        livenessProbe:
+          {{- toYaml .Values.frontend.livenessProbe | nindent 10 }}
+        readinessProbe:
+          {{- toYaml .Values.frontend.readinessProbe | nindent 10 }}
+        resources:
+          {{- toYaml .Values.frontend.resources | nindent 10 }}
+{{- end }}

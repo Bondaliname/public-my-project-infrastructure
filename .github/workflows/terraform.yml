@@ -1,0 +1,201 @@
+name: Terraform Azure CI/CD
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+    inputs:
+      destroy:
+        description: 'Destroy infrastructure? (type "destroy" to confirm)'
+        required: false
+        default: 'no'
+        type: string
+
+env:
+  TF_VERSION: "1.13.3"
+  WORKING_DIR: terraform
+  STORAGE_ACCOUNT: "tfstategames123451854321"
+
+jobs:
+  terraform:
+    name: "Terraform Deploy"
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Azure Login via OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Terraform Init
+        run: |
+          terraform -chdir=${{ env.WORKING_DIR }} init \
+            -backend-config="resource_group_name=rg-terraform-state" \
+            -backend-config="storage_account_name=${{ env.STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=games.terraform.tfstate"
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_USE_OIDC: true
+
+      - name: Terraform Format
+        run: terraform -chdir=${{ env.WORKING_DIR }} fmt -check -recursive
+
+      - name: Terraform Validate
+        run: terraform -chdir=${{ env.WORKING_DIR }} validate
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Get AKS Credentials (if exists)
+        run: |
+          az aks get-credentials \
+            --resource-group rg-games \
+            --name aks-games-cluster \
+            --overwrite-existing 2>/dev/null || echo "AKS not ready yet"
+        continue-on-error: true
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          EXIT_CODE=0
+          terraform -chdir=${{ env.WORKING_DIR }} plan \
+            -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+            -var="mysql_admin_password=${{ secrets.MYSQL_ADMIN_PASSWORD }}" \
+            -var="grafana_admin_password=${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+            -detailed-exitcode \
+            -out=tfplan || EXIT_CODE=$?
+          echo "exitcode=$EXIT_CODE" >> $GITHUB_OUTPUT
+          if [ $EXIT_CODE -eq 1 ]; then
+            echo "Terraform plan failed"
+            exit 1
+          elif [ $EXIT_CODE -eq 0 ]; then
+            echo "No changes detected"
+          else
+            echo "Changes detected"
+          fi
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_USE_OIDC: true
+
+      - name: Check for Changes
+        id: changes
+        run: |
+          if [ "${{ steps.plan.outputs.exitcode }}" == "2" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "Infrastructure changes detected"
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "No infrastructure changes"
+          fi
+      - name: Terraform Apply
+        if: steps.changes.outputs.has_changes == 'true' && github.ref == 'refs/heads/master' && github.event_name == 'push'
+        run: terraform -chdir=${{ env.WORKING_DIR }} apply -input=false tfplan
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_USE_OIDC: true
+
+      - name: Wait for AKS and Get Credentials
+        if: steps.changes.outputs.has_changes == 'true' && github.ref == 'refs/heads/master' && github.event_name == 'push'
+        run: |
+          echo "Waiting for AKS cluster..."
+          sleep 60
+          az aks get-credentials \
+            --resource-group rg-games \
+            --name aks-games-cluster \
+            --overwrite-existing
+          kubectl cluster-info
+
+      - name: Refresh Azure Login
+        if: steps.changes.outputs.has_changes == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get Terraform Outputs
+        id: outputs
+        run: |
+          ACR_LOGIN_SERVER=$(terraform -chdir=${{ env.WORKING_DIR }} output -raw acr_login_server)
+          MYSQL_HOST=$(terraform -chdir=${{ env.WORKING_DIR }} output -raw mysql_host)
+          TRAEFIK_PUBLIC_IP=$(terraform -chdir=${{ env.WORKING_DIR }} output -raw traefik_ip)
+          if [ -z "$ACR_LOGIN_SERVER" ] || [ -z "$MYSQL_HOST" ] || [ -z "$TRAEFIK_PUBLIC_IP" ]; then
+            echo "Error: One or more Terraform outputs are empty"
+            echo "ACR_LOGIN_SERVER='$ACR_LOGIN_SERVER'"
+            echo "MYSQL_HOST='$MYSQL_HOST'"
+            echo "TRAEFIK_PUBLIC_IP='$TRAEFIK_PUBLIC_IP'"
+            exit 1
+          fi
+          echo "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" >> $GITHUB_ENV
+          echo "MYSQL_HOST=$MYSQL_HOST" >> $GITHUB_ENV
+          echo "TRAEFIK_PUBLIC_IP=$TRAEFIK_PUBLIC_IP" >> $GITHUB_ENV
+          echo "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER"
+          echo "MYSQL_HOST=$MYSQL_HOST"
+          echo "Traefik IP: $TRAEFIK_PUBLIC_IP"
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_USE_OIDC: true
+
+      - name: Save Outputs as Artifact
+        run: |
+          cat > terraform-outputs.env << EOF
+          ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER
+          TRAEFIK_PUBLIC_IP=$TRAEFIK_PUBLIC_IP
+          MYSQL_HOST=$MYSQL_HOST
+          EOF
+      - name: Upload Outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-outputs
+          path: terraform-outputs.env
+          retention-days: 1
+
+      - name: Login to ACR
+        run: |
+          ACR_NAME=$(echo $ACR_LOGIN_SERVER | cut -d'.' -f1)
+          az acr login --name $ACR_NAME
+
+      - name: Terraform Destroy
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.destroy == 'destroy'
+        run: |
+          echo "DESTROYING INFRASTRUCTURE"
+          terraform -chdir=${{ env.WORKING_DIR }} destroy \
+            -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            -var="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+            -var="mysql_admin_password=${{ secrets.MYSQL_ADMIN_PASSWORD }}" \
+            -var="grafana_admin_password=${{ secrets.GRAFANA_ADMIN_PASSWORD }}" \
+            -auto-approve
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_USE_OIDC: true

@@ -1,0 +1,83 @@
+{{- if .Values.backend.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-backend
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: {{ .Release.Name }}
+    component: backend
+    environment: {{ .Values.global.environment }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.backend.replicaCount }}
+  {{- end }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+      component: backend
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+        component: backend
+        environment: {{ .Values.global.environment }}
+    spec:
+      containers:
+        - name: {{ .Values.backend.name | default "backend" }}
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.backend.service.targetPort }}
+              protocol: TCP
+          env:
+          {{- range $key, $value := .Values.backend.env }}
+            - name: {{ $key | quote }}
+              value: {{ $value | quote }}
+          {{- end }}
+            - name: MYSQL_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mysql.secretName }}
+                  key: MYSQL_HOST
+            - name: MYSQL_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mysql.secretName }}
+                  key: MYSQL_PORT
+            - name: MYSQL_DATABASE
+              value: {{ .Values.backend.mysql.database | quote }}
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mysql.secretName }}
+                  key: MYSQL_USER
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mysql.secretName }}
+                  key: MYSQL_PASSWORD
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-jwt-secret
+                  key: JWT_SECRET
+            - name: JWT_EXPIRATION
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Release.Name }}-jwt-config
+                  key: JWT_EXPIRATION
+          {{- if .Values.backend.livenessProbe }}
+          livenessProbe:
+{{- toYaml .Values.backend.livenessProbe | nindent 12 }}
+          {{- end }}
+          {{- if .Values.backend.readinessProbe }}
+          readinessProbe:
+{{- toYaml .Values.backend.readinessProbe | nindent 12 }}
+          {{- end }}
+          resources:
+{{- toYaml .Values.backend.resources | nindent 12 }}
+{{- end }}
