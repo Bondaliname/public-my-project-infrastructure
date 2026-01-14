@@ -1,8 +1,6 @@
-## Game Application Infrastructure
+## Application Infrastructure
 
-This project demonstrates a DevOps infrastructure setup for deploying a **video game diary web application** on **Microsoft Azure**.
-
-The application is a web-based platform that allows users to keep track of video games, record progress, write notes, and manage related gaming information in one place.
+This project demonstrates a DevOps infrastructure setup for deploying a **web application** on **Microsoft Azure**.
 
 The project showcases modern **Infrastructure as Code (IaC)** practices, automated **CI/CD pipelines**, containerization, and orchestration using **Kubernetes**. The infrastructure is designed with scalability, reproducibility, and DevOps best practices in mind.
 
